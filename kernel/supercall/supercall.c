@@ -79,6 +79,35 @@ int ksu_install_fd(void)
     return fd;
 }
 
+// Install KSU su fd to current process
+int ksu_install_su_fd(void)
+{
+    struct file *filp;
+    int fd;
+
+    // Get unused fd
+    fd = get_unused_fd_flags(O_CLOEXEC);
+    if (fd < 0) {
+        pr_err("ksu_install_su_fd: failed to get unused fd\n");
+        return fd;
+    }
+
+    // Create anonymous inode file
+    filp = anon_inode_getfile("[ksu_driver_su]", &anon_ksu_fops, NULL, O_RDWR | O_CLOEXEC);
+    if (IS_ERR(filp)) {
+        pr_err("ksu_install_su_fd: failed to create anon inode file\n");
+        put_unused_fd(fd);
+        return PTR_ERR(filp);
+    }
+
+    // Install fd
+    fd_install(fd, filp);
+
+    pr_info("ksu su fd installed: %d for pid %d\n", fd, current->pid);
+
+    return fd;
+}
+
 #ifdef CONFIG_KSU_TOOLKIT_SUPPORT
 extern int ksu_try_handle_toolkit_cmd(int magic2, unsigned int cmd, void __user **arg);
 #endif

@@ -22,6 +22,7 @@
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
 #include <linux/namei.h>
+#include <linux/fs_struct.h>
 #include "selinux/selinux.h"
 #include "objsec.h"
 #endif // #ifdef CONFIG_KSU_SUSFS
@@ -338,30 +339,38 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
     struct ksu_sulog_pending_event *pending_sucompat = NULL;
     struct path kpath;
     bool is_allowed = ksu_is_allow_uid_for_current(ksu_get_uid_t(current_uid()));
+    int ret;
 
 #ifdef KSU_COMPAT_USE_STATIC_KEY
     // Yep, maybe someusers love turn off sucompat <- idk how they managed to keep using it
     // But for mostly users, sucompat is enabled, so unlikely here
     if (!static_branch_unlikely(&ksu_su_compat_enabled)) {
-        return 0;
+        return -EINVAL;
     }
 #else
     if (!ksu_su_compat_enabled) {
-        return 0;
+        return -EINVAL;
     }
 #endif
 
     if (!is_allowed)
-        return 0;
+        return -EINVAL;
 
     if (likely(memcmp(filename, su_path, sizeof(su_path))))
-        return 0;
+        return -EINVAL;
+
+#ifdef CONFIG_KSU_SUSFS
+    if (current_chrooted()) {
+        pr_err("ksu_handle_execveat_sucompat: su found but NOT allowed! Because current process is running in chrooted environment\n");
+        return -EINVAL;
+    }
+#endif
 
     pr_info("do_execveat_common su found\n");
 
-    escape_with_root_profile();
-
     pending_sucompat = ksu_sulog_capture_sucompat_manual(filename, *argv, GFP_KERNEL);
+
+    ret = escape_with_root_profile();
 
     // We are only check ksud exists
     // In manual hook, we can't try exec ksud, and detect exec success or not
@@ -374,7 +383,11 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
     path_put(&kpath);
     memcpy((void *)filename, ksud_path, sizeof(ksud_path));
 out:
-    ksu_sulog_emit_pending(pending_sucompat, 0, GFP_KERNEL);
+    ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
+    if (ret) {
+        pr_err("escape_with_root_profile() failed: %d\n", ret);
+        return -EINVAL;
+    }
     return 0;
 }
 
@@ -412,7 +425,7 @@ int ksu_handle_execve(int *fd, const char *filename, void *argv, void *envp, int
 
 #ifndef CONFIG_KSU_TRACEPOINT_HOOK
     if (ksu_is_current_proc_unprivillege()) {
-        return 0;
+        return -EINVAL;
     }
 #endif
 
@@ -424,7 +437,7 @@ int ksu_handle_execve(int *fd, const char *filename, void *argv, void *envp, int
     }
 
     if (*fd != AT_FDCWD || *flags != 0) {
-        return 0;
+        return -EINVAL;
     }
 
 skip_check:
@@ -457,9 +470,13 @@ skip_check:
 int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags)
 {
     struct filename *filename;
+    if (unlikely(!filename_ptr)) {
+        return -EINVAL;
+    }
+
     filename = *filename_ptr;
     if (IS_ERR(filename)) {
-        return 0;
+        return -EINVAL;
     }
 
     return ksu_handle_execve(fd, filename->name, argv, envp, flags);
@@ -501,6 +518,11 @@ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *_
 
     if (likely(memcmp((*filename)->name, su_path, sizeof(su_path))))
         return 0;
+
+    if (current_chrooted()) {
+        pr_err("ksu_handle_faccessat: su found but NOT allowed! Because current process is running in chrooted environment\n");
+        return 0;
+    }
 
     old_cred = override_creds(ksu_cred);
     if (is_ksud_exists()) {
@@ -578,6 +600,11 @@ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags)
     }
 
     if (likely(memcmp((*filename)->name, su_path, sizeof(su_path)))) {
+        return 0;
+    }
+
+    if (current_chrooted()) {
+        pr_err("ksu_handle_stat: su found but NOT allowed! Because current process is running in chrooted environment\n");
         return 0;
     }
 
